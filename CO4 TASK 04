@@ -1,0 +1,78 @@
+from pathlib import Path
+
+
+# --- 4.2 Demonstrating the Original Defects ---
+def buggy_save_returns(books, log_path="buggy_returns.log"):
+    log = open(log_path, "w")  # Overwrites previous days + never closed on error
+    for b in books:
+        log.write(b)  # Missing '\n' joins titles together
+    log.close()
+
+
+def buggy_process(day_file, log_path="buggy_returns.log"):
+    try:
+        books = open(day_file).read().split("\n")
+        buggy_save_returns(books, log_path)
+    except FileNotFoundError:
+        print("missing")
+
+
+# --- 4.3 Repaired Program ---
+def save_returns(books, log_path="returns.log", error_log_path="error.log"):
+    """Append each returned book on its own line; log errors without losing data."""
+    try:
+        with open(log_path, "a", encoding="utf-8") as log_file:
+            for book in books:
+                cleaned = book.strip()
+                if cleaned:
+                    log_file.write(cleaned + "\n")
+    except OSError as exc:
+        with open(error_log_path, "a", encoding="utf-8") as err_file:
+            err_file.write(f"Failed writing to {log_path}: {exc}\n")
+
+
+def process_day(day_file, log_path="returns.log", error_log_path="error.log"):
+    """Read daily book returns safely and append them to the cumulative log."""
+    try:
+        with open(day_file, "r", encoding="utf-8") as src:
+            books = [line.strip() for line in src if line.strip()]
+        save_returns(books, log_path=log_path, error_log_path=error_log_path)
+    except FileNotFoundError as exc:
+        msg = f"Missing daily return file '{day_file}': {exc}"
+        print(msg)
+        with open(error_log_path, "a", encoding="utf-8") as err_file:
+            err_file.write(msg + "\n")
+    except OSError as exc:
+        msg = f"I/O error while reading '{day_file}': {exc}"
+        print(msg)
+        with open(error_log_path, "a", encoding="utf-8") as err_file:
+            err_file.write(msg + "\n")
+
+
+if __name__ == "__main__":
+    # Create 3 sample daily return files
+    Path("day1.txt").write_text("Clean Code\nAutomate the Boring Stuff\n", encoding="utf-8")
+    Path("day2.txt").write_text("Fluent Python\n", encoding="utf-8")
+    Path("day3.txt").write_text("Introduction to Algorithms\nDesign Patterns\n", encoding="utf-8")
+
+    # Clean old test outputs if re-running
+    for f in ["buggy_returns.log", "returns.log", "error.log"]:
+        p = Path(f)
+        if p.exists():
+            p.unlink()
+
+    print("--- Running Buggy Version Across 3 Days ---")
+    for day_f in ["day1.txt", "day2.txt", "day3.txt"]:
+        buggy_process(day_f)
+    print("Buggy log content (only Day 3, no newlines):")
+    print(repr(Path("buggy_returns.log").read_text(encoding="utf-8")))
+
+    print("\n--- Running Repaired Version Across 3 Days + 1 Missing Day ---")
+    for day_f in ["day1.txt", "day2.txt", "day3.txt", "day4_missing.txt"]:
+        process_day(day_f)
+
+    print("\nRepaired returns.log:")
+    print(Path("returns.log").read_text(encoding="utf-8"))
+
+    print("Repaired error.log:")
+    print(Path("error.log").read_text(encoding="utf-8"))
