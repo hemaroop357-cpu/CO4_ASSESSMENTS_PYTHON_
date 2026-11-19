@@ -1,0 +1,266 @@
+from pathlib import Path
+import shutil
+import sys
+
+
+def create_fest_package(base_dir: Path):
+    pkg = base_dir / "fest_desk"
+    pkg.mkdir(parents=True, exist_ok=True)
+
+    (pkg / "validator.py").write_text(
+        '''class FestRegistrationError(Exception):
+    """Raised when a fest registration line fails format or field validation."""
+
+
+def is_valid_email(email):
+    """Validate email using standard string methods only (no regex)."""
+    addr = email.strip()
+    if not addr or " " in addr:
+        return False
+    if addr.count("@") != 1:
+        return False
+    local, domain = addr.split("@")
+    if not local or not domain:
+        return False
+    if "." not in domain:
+        return False
+    if domain.startswith(".") or domain.endswith(".") or ".." in domain:
+        return False
+    return True
+
+
+def parse_and_validate_line(raw_line, source_file, line_no):
+    """Parse 'reg_no,name,dept,email,ev1;ev2' and validate fields."""
+    line = raw_line.strip()
+    if not line:
+        raise FestRegistrationError("Blank line")
+
+    parts = [p.strip() for p in line.split(",")]
+    if len(parts) != 5:
+        raise FestRegistrationError(f"Expected 5 comma-separated fields, got {len(parts)}")
+
+    reg_no, name, dept, email, events_raw = parts
+    if not reg_no:
+        raise FestRegistrationError("Missing register number")
+    if not name:
+        raise FestRegistrationError("Missing student name")
+    if not dept:
+        raise FestRegistrationError("Missing department")
+    if not is_valid_email(email):
+        raise FestRegistrationError(f"Invalid email '{email}'")
+
+    events = [ev.strip() for ev in events_raw.split(";") if ev.strip()]
+    if not events:
+        raise FestRegistrationError("No valid events selected")
+
+    # Deduplicate events for the same student while preserving order
+    unique_events = list(dict.fromkeys(events))
+
+    return {
+        "reg_no": reg_no,
+        "name": name,
+        "dept": dept,
+        "email": email,
+        "events": unique_events,
+        "source_file": str(source_file),
+        "line_no": line_no,
+    }
+''',
+        encoding="utf-8",
+    )
+
+    (pkg / "processor.py").write_text(
+        '''from pathlib import Path
+from .validator import FestRegistrationError, parse_and_validate_line
+
+
+def process_department_files(file_paths, error_log_path):
+    """Process multiple department files; keep going if a file is missing or a line is bad."""
+    seen_reg_nos = set()
+    master_records = []
+    error_entries = []
+
+    for path_item in file_paths:
+        path = Path(path_item)
+        try:
+            with path.open("r", encoding="utf-8") as f:
+                for line_no, raw_line in enumerate(f, start=1):
+                    if not raw_line.strip():
+                        continue
+                    try:
+                        record = parse_and_validate_line(raw_line, path.name, line_no)
+                    except FestRegistrationError as exc:
+                        error_entries.append(f"{path.name}:{line_no} | {exc} | {raw_line.rstrip()}")
+                        continue
+
+                    if record["reg_no"] in seen_reg_nos:
+                        error_entries.append(
+                            f"{path.name}:{line_no} | Duplicate register number '{record['reg_no']}' skipped | {raw_line.rstrip()}"
+                        )
+                        continue
+
+                    seen_reg_nos.add(record["reg_no"])
+                    master_records.append(record)
+
+        except FileNotFoundError as exc:
+            error_entries.append(f"{path.name}:0 | Missing file: {exc}")
+        except PermissionError as exc:
+            error_entries.append(f"{path.name}:0 | Permission denied: {exc}")
+        except UnicodeDecodeError as exc:
+            error_entries.append(f"{path.name}:0 | Encoding error: {exc}")
+
+    err_path = Path(error_log_path)
+    err_path.parent.mkdir(parents=True, exist_ok=True)
+    err_path.write_text(
+        "\\n".join(error_entries) + ("\\n" if error_entries else ""),
+        encoding="utf-8",
+    )
+
+    return master_records, error_entries
+''',
+        encoding="utf-8",
+    )
+
+    (pkg / "reporter.py").write_text(
+        '''from pathlib import Path
+
+
+def write_outputs(master_records, error_entries, output_dir):
+    """Write master list, per-event participant files, and summary report."""
+    out_dir = Path(output_dir)
+    events_dir = out_dir / "events"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    events_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. Master list (CSV)
+    master_lines = ["reg_no,name,dept,email,events"]
+    event_participants = {}
+    dept_counts = {}
+
+    for rec in master_records:
+        events_joined = ";".join(rec["events"])
+        master_lines.append(
+            f"{rec['reg_no']},{rec['name']},{rec['dept']},{rec['email']},{events_joined}"
+        )
+        dept_counts[rec["dept"]] = dept_counts.get(rec["dept"], 0) + 1
+        for ev in rec["events"]:
+            event_participants.setdefault(ev, []).append((rec["reg_no"], rec["name"], rec["dept"]))
+
+    (out_dir / "master_registrations.csv").write_text(
+        "\\n".join(master_lines) + "\\n",
+        encoding="utf-8",
+    )
+
+    # 2. Separate file per event
+    for ev_name, participants in sorted(event_participants.items()):
+        safe_name = ev_name.lower().replace(" ", "_") + ".txt"
+        lines = [f"{reg} | {name} | {dept}" for reg, name, dept in participants]
+        (events_dir / safe_name).write_text(
+            "\\n".join(lines) + ("\\n" if lines else ""),
+            encoding="utf-8",
+        )
+
+    # 3. Summary report
+    summary_lines = [
+        "=== COLLEGE FEST REGISTRATION SUMMARY ===",
+        f"Unique Valid Registrations: {len(master_records)}",
+        f"Logged Errors / Duplicates: {len(error_entries)}",
+        "",
+        "--- Registrations by Department ---",
+    ]
+    for dept, count in sorted(dept_counts.items()):
+        summary_lines.append(f"{dept}: {count}")
+
+    summary_lines.append("")
+    summary_lines.append("--- Participants by Event ---")
+    for ev_name, participants in sorted(event_participants.items()):
+        summary_lines.append(f"{ev_name}: {len(participants)}")
+
+    (out_dir / "summary_report.txt").write_text(
+        "\\n".join(summary_lines) + "\\n",
+        encoding="utf-8",
+    )
+''',
+        encoding="utf-8",
+    )
+
+    (pkg / "__init__.py").write_text(
+        '''from .validator import FestRegistrationError, is_valid_email, parse_and_validate_line
+from .processor import process_department_files
+from .reporter import write_outputs
+
+__all__ = [
+    "FestRegistrationError",
+    "is_valid_email",
+    "parse_and_validate_line",
+    "process_department_files",
+    "write_outputs",
+]
+''',
+        encoding="utf-8",
+    )
+
+
+def run_demo():
+    base_dir = Path("task6_demo")
+    if base_dir.exists():
+        shutil.rmtree(base_dir)
+    inputs_dir = base_dir / "inputs"
+    outputs_dir = base_dir / "outputs"
+    inputs_dir.mkdir(parents=True)
+
+    create_fest_package(base_dir)
+
+    # Sample department files (4 created + 1 intentionally missing)
+    (inputs_dir / "cse.txt").write_text(
+        "192311001,Ananya Sharma,CSE,ananya.sharma@simats.edu.in,Debate;Coding Quiz\n"
+        "192311002,Rohan Verma,CSE,rohan.v@simats.edu.in,Dance\n"
+        "192311001,Ananya Sharma,CSE,ananya.sharma@simats.edu.in,Dance\n",  # Duplicate reg_no
+        encoding="utf-8",
+    )
+    (inputs_dir / "ece.txt").write_text(
+        "192312005,Kavya Krishnan,ECE,kavya.k@simats.edu.in,Coding Quiz;Photography\n"
+        "192312009,Vikram Rao,ECE,invalid-email-format,Dance\n",  # Invalid email
+        encoding="utf-8",
+    )
+    (inputs_dir / "mech.txt").write_text(
+        "192313010,Surya Prakash,MECH,surya@simats.edu.in,Photography\n"
+        "192313014,Broken Line Only Two Fields\n",  # Damaged line
+        encoding="utf-8",
+    )
+    (inputs_dir / "it.txt").write_text(
+        "192314003,Neha Menon,IT,neha.menon@simats.edu.in,Debate\n",
+        encoding="utf-8",
+    )
+
+    dept_files = [
+        inputs_dir / "cse.txt",
+        inputs_dir / "ece.txt",
+        inputs_dir / "mech.txt",
+        inputs_dir / "it.txt",
+        inputs_dir / "civil.txt",  # Missing file on purpose
+    ]
+
+    sys.path.insert(0, str(base_dir))
+    from fest_desk import process_department_files, write_outputs
+
+    master, errors = process_department_files(dept_files, outputs_dir / "error.log")
+    write_outputs(master, errors, outputs_dir)
+
+    print("=== MASTER LIST ===")
+    print((outputs_dir / "master_registrations.csv").read_text(encoding="utf-8"))
+
+    print("=== SUMMARY REPORT ===")
+    print((outputs_dir / "summary_report.txt").read_text(encoding="utf-8"))
+
+    print("=== ERROR LOG ===")
+    print((outputs_dir / "error.log").read_text(encoding="utf-8"))
+
+    print("=== EVENT FILES GENERATED ===")
+    for ev_file in sorted((outputs_dir / "events").glob("*.txt")):
+        print(f"-- {ev_file.name} --")
+        print(ev_file.read_text(encoding="utf-8").strip())
+
+
+if __name__ == "__main__":
+    run_demo()
