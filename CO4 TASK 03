@@ -1,0 +1,65 @@
+import os
+import tempfile
+
+
+class InvalidRecord(Exception):
+    """Raised when a line of the attendance file is not in the expected format."""
+
+
+def parse_line(line):
+    """'192311001,2026-10-08,P' -> ('192311001', '2026-10-08', 'P')"""
+    parts = [p.strip() for p in line.strip().split(",")]
+    # TODO 1: Raise InvalidRecord if there are not exactly 3 fields or the status is
+    # not P or A; otherwise return the 3 fields as a tuple
+    if len(parts) != 3:
+        raise InvalidRecord(f"expected 3 fields, found {len(parts)}")
+
+    reg_no, date_str, status = parts
+    if status not in ("P", "A"):
+        raise InvalidRecord(f"invalid status '{status}'")
+
+    return (reg_no, date_str, status)
+
+
+def summarise(path):
+    present, absent, errors = 0, 0, []
+    # TODO 2: Open the file with a with statement, parse each line inside try/except
+    # InvalidRecord, count P and A, and record (line number, message) for bad lines
+    try:
+        with open(path, "r", encoding="utf-8") as file:
+            for line_no, line in enumerate(file, start=1):
+                if not line.strip():
+                    continue
+                try:
+                    _, _, status = parse_line(line)
+                    if status == "P":
+                        present += 1
+                    elif status == "A":
+                        absent += 1
+                except InvalidRecord as exc:
+                    errors.append((line_no, str(exc)))
+    except FileNotFoundError:
+        errors.append((0, f"file not found: '{path}'"))
+
+    return present, absent, errors
+
+
+if __name__ == "__main__":
+    data = (
+        "192311001,2026-10-08,P\n"
+        "192311002,2026-10-08,A\n"
+        "192311003,2026-10-08\n"
+        "192311004,2026-10-08,L\n"
+    )
+    with tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False, encoding="utf-8") as tmp:
+        tmp.write(data)
+        tmp_path = tmp.name
+
+    try:
+        print("Valid sample output:", summarise(tmp_path))
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+    # Test missing file handling
+    print("Missing file output:", summarise("non_existent_attendance_file.csv"))
