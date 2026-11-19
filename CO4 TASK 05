@@ -1,0 +1,316 @@
+from pathlib import Path
+import shutil
+import sys
+
+
+def setup_sample_attendance(base_dir: Path):
+    """Create 4 days of sample attendance files where 192311002 is absent for 3 consecutive days."""
+    if base_dir.exists():
+        shutil.rmtree(base_dir)
+    base_dir.mkdir(parents=True)
+
+    days = {
+        "2026-10-01.txt": "192311001,P\n192311002,P\n192311003,A\n",
+        "2026-10-02.txt": "192311001,P\n192311002,A\n192311003,P\n",
+        "2026-10-03.txt": "192311001,A\n192311002,A\n192311003,P\n",
+        "2026-10-04.txt": "192311001,P\n192311002,A\n192311003,P\n",
+    }
+    for filename, content in days.items():
+        (base_dir / filename).write_text(content, encoding="utf-8")
+
+
+# ---------------------------------------------------------
+# (a) ONE SCRIPT: single_script_attendance.py
+# ---------------------------------------------------------
+SINGLE_SCRIPT_CODE = '''from pathlib import Path
+
+
+def read_records(folder_path):
+    records = []
+    for file_path in sorted(Path(folder_path).glob("*.txt")):
+        day = file_path.stem
+        with file_path.open("r", encoding="utf-8") as f:
+            for line in f:
+                parts = [p.strip() for p in line.strip().split(",")]
+                if len(parts) == 2 and parts[1] in ("P", "A"):
+                    records.append((day, parts[0], parts[1]))
+    return records
+
+
+def compute_stats(records):
+    counts = {}
+    for _, reg_no, status in records:
+        if reg_no not in counts:
+            counts[reg_no] = {"P": 0, "A": 0}
+        counts[reg_no][status] += 1
+
+    percentages = {}
+    for reg_no, c in counts.items():
+        total = c["P"] + c["A"]
+        percentages[reg_no] = (c["P"] / total * 100.0) if total else 0.0
+    return percentages
+
+
+def find_consecutive_absentees(records, streak_limit=3):
+    by_student = {}
+    for day, reg_no, status in records:
+        by_student.setdefault(reg_no, []).append((day, status))
+
+    flagged = []
+    for reg_no, day_statuses in sorted(by_student.items()):
+        day_statuses.sort(key=lambda item: item[0])
+        streak = 0
+        for _, status in day_statuses:
+            if status == "A":
+                streak += 1
+                if streak >= streak_limit and reg_no not in flagged:
+                    flagged.append(reg_no)
+            else:
+                streak = 0
+    return flagged
+
+
+def write_reports(percentages, streak_students, out_dir):
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    with (out / "summary.txt").open("w", encoding="utf-8") as f:
+        for reg_no, pct in sorted(percentages.items()):
+            f.write(f"{reg_no}: {pct:.2f}%\\n")
+
+    with (out / "consecutive_absent_3d.txt").open("w", encoding="utf-8") as f:
+        for reg_no in streak_students:
+            f.write(f"{reg_no}\\n")
+
+
+if __name__ == "__main__":
+    recs = read_records("sample_days")
+    pcts = compute_stats(recs)
+    streaks = find_consecutive_absentees(recs, 3)
+    write_reports(pcts, streaks, "out_single")
+    print("[Single Script] 3+ consecutive absentees:", streaks)
+'''
+
+
+# ---------------------------------------------------------
+# (b) ONE MODULE IMPORTED BY A MAIN SCRIPT
+#     attendance_util.py + main_b.py
+# ---------------------------------------------------------
+MODULE_B_CODE = '''from pathlib import Path
+
+
+def read_records(folder_path):
+    records = []
+    for file_path in sorted(Path(folder_path).glob("*.txt")):
+        day = file_path.stem
+        with file_path.open("r", encoding="utf-8") as f:
+            for line in f:
+                parts = [p.strip() for p in line.strip().split(",")]
+                if len(parts) == 2 and parts[1] in ("P", "A"):
+                    records.append((day, parts[0], parts[1]))
+    return records
+
+
+def compute_stats(records):
+    counts = {}
+    for _, reg_no, status in records:
+        counts.setdefault(reg_no, {"P": 0, "A": 0})[status] += 1
+    return {
+        reg: (c["P"] / (c["P"] + c["A"]) * 100.0) if (c["P"] + c["A"]) else 0.0
+        for reg, c in counts.items()
+    }
+
+
+def find_consecutive_absentees(records, streak_limit=3):
+    by_student = {}
+    for day, reg_no, status in records:
+        by_student.setdefault(reg_no, []).append((day, status))
+    result = []
+    for reg_no, items in sorted(by_student.items()):
+        items.sort(key=lambda x: x[0])
+        streak = 0
+        for _, status in items:
+            streak = streak + 1 if status == "A" else 0
+            if streak >= streak_limit and reg_no not in result:
+                result.append(reg_no)
+    return result
+
+
+def write_reports(percentages, streak_students, out_dir):
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "summary.txt").write_text(
+        "\\n".join(f"{r}: {p:.2f}%" for r, p in sorted(percentages.items())) + "\\n",
+        encoding="utf-8",
+    )
+    (out / "consecutive_absent_3d.txt").write_text(
+        "\\n".join(streak_students) + ("\\n" if streak_students else ""),
+        encoding="utf-8",
+    )
+'''
+
+MAIN_B_CODE = '''import attendance_util
+
+
+def main():
+    records = attendance_util.read_records("sample_days")
+    stats = attendance_util.compute_stats(records)
+    streaks = attendance_util.find_consecutive_absentees(records, 3)
+    attendance_util.write_reports(stats, streaks, "out_module_b")
+    print("[One Module + Main] 3+ consecutive absentees:", streaks)
+
+
+if __name__ == "__main__":
+    main()
+'''
+
+
+# ---------------------------------------------------------
+# (c) THREE MODULES IN ONE FOLDER
+#     reader.py, stats.py, report.py, main_c.py
+# ---------------------------------------------------------
+READER_CODE = '''from pathlib import Path
+
+
+def read_records(folder_path):
+    records = []
+    for file_path in sorted(Path(folder_path).glob("*.txt")):
+        day = file_path.stem
+        with file_path.open("r", encoding="utf-8") as f:
+            for line in f:
+                parts = [p.strip() for p in line.strip().split(",")]
+                if len(parts) == 2 and parts[1] in ("P", "A"):
+                    records.append((day, parts[0], parts[1]))
+    return records
+'''
+
+STATS_CODE = '''def percentage(records):
+    counts = {}
+    for _, reg_no, status in records:
+        counts.setdefault(reg_no, {"P": 0, "A": 0})[status] += 1
+    return {
+        reg: (c["P"] / (c["P"] + c["A"]) * 100.0) if (c["P"] + c["A"]) else 0.0
+        for reg, c in counts.items()
+    }
+
+
+def consecutive_absentees(records, streak_limit=3):
+    by_student = {}
+    for day, reg_no, status in records:
+        by_student.setdefault(reg_no, []).append((day, status))
+    flagged = []
+    for reg_no, items in sorted(by_student.items()):
+        items.sort(key=lambda x: x[0])
+        streak = 0
+        for _, status in items:
+            streak = streak + 1 if status == "A" else 0
+            if streak >= streak_limit and reg_no not in flagged:
+                flagged.append(reg_no)
+    return flagged
+'''
+
+REPORT_CODE = '''from pathlib import Path
+
+
+def write_all(percentages, streak_students, out_dir):
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "summary.txt").write_text(
+        "\\n".join(f"{r}: {p:.2f}%" for r, p in sorted(percentages.items())) + "\\n",
+        encoding="utf-8",
+    )
+    (out / "consecutive_absent_3d.txt").write_text(
+        "\\n".join(streak_students) + ("\\n" if streak_students else ""),
+        encoding="utf-8",
+    )
+'''
+
+MAIN_C_CODE = '''import reader
+import stats
+import report
+
+
+def main():
+    records = reader.read_records("sample_days")
+    pcts = stats.percentage(records)
+    streaks = stats.consecutive_absentees(records, 3)
+    report.write_all(pcts, streaks, "out_three_mods")
+    print("[Three Modules] 3+ consecutive absentees:", streaks)
+
+
+if __name__ == "__main__":
+    main()
+'''
+
+
+# ---------------------------------------------------------
+# (d) PACKAGE attendance/ WITH __init__.py + SUB-MODULES
+# ---------------------------------------------------------
+INIT_CODE = '''from .reader import read_records
+from .stats import percentage, consecutive_absentees
+from .report import write_all
+
+__all__ = ["read_records", "percentage", "consecutive_absentees", "write_all"]
+'''
+
+MAIN_D_CODE = '''from attendance import read_records, percentage, consecutive_absentees, write_all
+
+
+def main():
+    records = read_records("sample_days")
+    pcts = percentage(records)
+    streaks = consecutive_absentees(records, 3)
+    write_all(pcts, streaks, "out_package")
+    print("[Package attendance/] 3+ consecutive absentees:", streaks)
+
+
+if __name__ == "__main__":
+    main()
+'''
+
+
+def build_and_run_all():
+    work_dir = Path("task5_demo")
+    if work_dir.exists():
+        shutil.rmtree(work_dir)
+    work_dir.mkdir()
+
+    setup_sample_attendance(work_dir / "sample_days")
+
+    # (a)
+    (work_dir / "single_script_attendance.py").write_text(SINGLE_SCRIPT_CODE, encoding="utf-8")
+
+    # (b)
+    (work_dir / "attendance_util.py").write_text(MODULE_B_CODE, encoding="utf-8")
+    (work_dir / "main_b.py").write_text(MAIN_B_CODE, encoding="utf-8")
+
+    # (c)
+    (work_dir / "reader.py").write_text(READER_CODE, encoding="utf-8")
+    (work_dir / "stats.py").write_text(STATS_CODE, encoding="utf-8")
+    (work_dir / "report.py").write_text(REPORT_CODE, encoding="utf-8")
+    (work_dir / "main_c.py").write_text(MAIN_C_CODE, encoding="utf-8")
+
+    # (d)
+    pkg_dir = work_dir / "attendance"
+    pkg_dir.mkdir()
+    (pkg_dir / "__init__.py").write_text(INIT_CODE, encoding="utf-8")
+    (pkg_dir / "reader.py").write_text(READER_CODE, encoding="utf-8")
+    (pkg_dir / "stats.py").write_text(STATS_CODE, encoding="utf-8")
+    (pkg_dir / "report.py").write_text(REPORT_CODE, encoding="utf-8")
+    (work_dir / "main_d.py").write_text(MAIN_D_CODE, encoding="utf-8")
+
+    # Execute all four inside work_dir
+    sys.path.insert(0, str(work_dir))
+    import os
+    prev_cwd = os.getcwd()
+    os.chdir(work_dir)
+    try:
+        exec(compile(Path("single_script_attendance.py").read_text(), "single_script_attendance.py", "exec"), {"__name__": "__main__"})
+        exec(compile(Path("main_b.py").read_text(), "main_b.py", "exec"), {"__name__": "__main__"})
+        exec(compile(Path("main_c.py").read_text(), "main_c.py", "exec"), {"__name__": "__main__"})
+        exec(compile(Path("main_d.py").read_text(), "main_d.py", "exec"), {"__name__": "__main__"})
+    finally:
+        os.chdir(prev_cwd)
+
+
+if __name__ == "__main__":
+    build_and_run_all()
