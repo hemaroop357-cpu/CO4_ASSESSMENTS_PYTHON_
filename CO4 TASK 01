@@ -1,0 +1,76 @@
+from pathlib import Path
+
+
+def process_mess_bill(file_path):
+    """Read student mess entries line by line, sum valid amounts, and log bad lines."""
+    total = 0.0
+    valid_entries = []
+    rejected_lines = []
+
+    path = Path(file_path)
+    try:
+        with path.open("r", encoding="utf-8") as file:
+            for line_no, raw_line in enumerate(file, start=1):
+                line = raw_line.strip()
+                if not line:
+                    # Skip blank/trailing lines cleanly without treating as an error
+                    continue
+
+                parts = [p.strip() for p in line.split(",")]
+                if len(parts) != 3:
+                    rejected_lines.append((line_no, raw_line.rstrip("\n"), "Expected 3 fields (reg_no, name, amount)"))
+                    continue
+
+                reg_no, name, amount_str = parts
+                if not reg_no or not name:
+                    rejected_lines.append((line_no, raw_line.rstrip("\n"), "Missing register number or name"))
+                    continue
+
+                try:
+                    amount = float(amount_str)
+                    if amount < 0:
+                        rejected_lines.append((line_no, raw_line.rstrip("\n"), "Negative amount not allowed"))
+                        continue
+                except ValueError:
+                    rejected_lines.append((line_no, raw_line.rstrip("\n"), f"Invalid amount '{amount_str}'"))
+                    continue
+
+                total += amount
+                valid_entries.append(f"{reg_no} | {name:<15} | Rs. {amount:.2f}")
+
+    except FileNotFoundError:
+        print(f"Error: File not found -> {path}")
+        return None
+    except PermissionError:
+        print(f"Error: Permission denied when reading -> {path}")
+        return None
+    except UnicodeDecodeError as exc:
+        print(f"Error: Encoding issue in {path} -> {exc}")
+        return None
+
+    print("=== VALID MESS BILL ENTRIES ===")
+    for entry in valid_entries:
+        print(entry)
+
+    print(f"\nTotal Mess Collection: Rs. {total:.2f}")
+
+    if rejected_lines:
+        print("\n=== REJECTED LINES ===")
+        for line_no, content, reason in rejected_lines:
+            print(f"Line {line_no}: [{reason}] -> {content}")
+
+    return total, valid_entries, rejected_lines
+
+
+if __name__ == "__main__":
+    sample_input = Path("mess_oct.txt")
+    sample_input.write_text(
+        "192311001,Arun Kumar,1250.50\n"
+        "192311002,Priya Nair,1400\n"
+        "192311003,Karthik S\n"
+        "192311004,Meera R,abc\n"
+        "192311005,Divya M,980.75\n"
+        "\n",
+        encoding="utf-8",
+    )
+    process_mess_bill(sample_input)
